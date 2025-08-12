@@ -1,19 +1,30 @@
-# 2025_Coda-etal_NatureGenetics
+# 2025_Coda_NatureGenetics
 
-This is the code used to perform the ChIP analyses in the manuscript, "Locus-specific epigenetic editing in engram cells regulates memory retention" (Coda et al., 2024).
+This is the code used to perform the analyses in the manuscript, "Cell-type and locus-specific epigenetic editing of memory expression" (Coda et al., 2025, Nature Genetics).
 
-### Abstract
-With their Janus-faced property of being at once dynamic and stable, epigenetic mechanisms have for long been proposed to act as potential molecular mnemonics, but a cell type-specific, locus-restricted and temporally controllable interrogation thereof has thus far been lacking. Over the past years, accumulating evidence has shown that memories are likely encoded in sparse populations of brain cells, so-called engrams, which have, with few exceptions, received little molecular attention. Here, we combine c-Fos driven engram tagging with CRISPR-based epigenetic editing in vivo to assess whether and the extent to which the epigenetic regulation of a single locus within engram cells can contribute to memory formation and storage. Focusing on the promoter region of Arc, a master regulator of learning and synaptic plasticity, we find that its temporally restricted epigenetic regulation within engram cells in the mouse dentate gyrus is both necessary and sufficient for memory retention after learning as well as for memory maintenance after recall. Furthermore, such epigenetic editing and its behavioral consequence is reversible, and capable of bidirectionally altering memory capacities even outside the labile phase of memory consolidation. Together, these findings suggest that epigenetic mechanisms are causally involved in regulating memory expression.
 
-### Data Availability
+## Abstract
+Epigenetic mechanisms have for long been proposed to act as molecular mnemonics1–3, but whether the epigenetic makeup of a single genomic site can guide learnt behaviors remains unknown. Here, we combined CRISPR-based epigenetic editing tools4,5 with c-Fos driven engram technologies6,7 to address this question in memory-bearing neuronal ensembles. Focusing on the promoter region of Arc, a master regulator of synaptic plasticity8, we found that its locus-specific and temporally controllable epigenetic editing is necessary and sufficient to regulate memory expression. Such effects occurred irrespective of the memory phase – during the initially labile period after learning and for fully consolidated memories – and were reversible within subject, testifying to their inherent plasticity. These findings provide a proof-of-principle that site-specific epigenetic dynamics are causally implicated in memory expression.
 
-### Analysis Information
 
-#### Bulk ChIP-sequencing
+## Data Availability
+Raw and processed data files can be downloaded from [GSE299742](https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE299742).
+
+
+## Analysis Information
+### Bulk ChIP-sequencing
 This analysis was performed in order to determine off-target effects of Cas9.
 
-Fastq files were aligned and processed using Bowtie2, samtools and picard (`/code/1_runAlignment.sh`).  The R tool, csaw, was used to call peaks (`/code/2_PeakCalling_csaw.R`).  And Cas9 targets were determined by performing a differential enrichment analysis between IP and input samples (`/code/3_DEanalysis_edgeR.R`)
+Fastq files ([GSE256419](https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE256419)) were aligned and processed using Bowtie2, samtools and picard (`/code/1_bulk_ChIPseq/1_runAlignment.sh`). The R tool, csaw, was used to call peaks (`/code/1_bulk_ChIPseq/2_PeakCalling_csaw.R`).  And Cas9 targets were determined by performing a differential enrichment analysis between IP and input samples (`/code/1_bulk_ChIPseq/3_DEanalysis_edgeR.R`)
 
-#### Single-cell RNA-sequencing
 
-#### Single-cell ATAC-sequencing
+### Single-cell RNA-sequencing
+This analysis was performed to see which genes and pathways are enriched in Cas9+ excitatory neurons of the DG after Arc inactivation.
+
+Fastq files ([GSE299740](https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE299740)) were aligned and processed using Parse's Trailmaker (`/code/2_singleNuclear-RNAseq/1_runAlignment.sh`). Seurat was used to process the counts data, define cell types and characterize the cells (`/code/2_singleNuclear-RNAseq/2_seurat_processing.R`). Finally, Seurat was used to define genes that were differentially expressed in the Cas9 positive cells of the Dentate Gyrus (`/code/2_singleNuclear-RNAseq/3_DEanalysis.R`). 
+
+
+### Single-cell ATAC-sequencing
+This analysis was performed to see which regions have differential expression after Cas9 targeting of the Arc promoter. 
+
+Fastq files ([GSE299741](https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE299741)) were aligned and processed using CellRanger (`/code/3_singleNuclear-ATACseq/1_runAlignment.sh`). Seurat and Signac were used to process the counts data, define cell types, characterize the cells and perform differential expression analysis (`/code/3_singleNuclear-ATACseq/2_SignacAnalysis.R`). 
