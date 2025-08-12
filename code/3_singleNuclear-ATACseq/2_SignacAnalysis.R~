@@ -1,0 +1,432 @@
+## #############################################################################
+## Date:        October 2024
+## Author:      Allison M. Burns
+## Filename:    2_SignacAnalysis.R
+## Project:     single cell ATAC seq
+## Description: 
+## #############################################################################
+
+################################################################################
+## Setup
+################################################################################
+library(Rsamtools)
+library(tidyverse)
+library(Signac)
+library(Seurat)
+library(GenomicRanges)
+library(GenomicFeatures)
+
+## Define Bam Files
+bam_fls <- list.files("./data/0_alignment/subset_bam",
+                      full.names = TRUE,
+                      pattern = ".bam$")
+names(bam_fls) <- gsub("dCas9_|.bam","",basename(bam_fls))
+
+## Load peak count matrices from cellranger
+arc <- Read10X_h5("./data/0_alignment/dCas9_plus_Arc_sgRNA/outs/filtered_peak_bc_matrix.h5")
+nt <- Read10X_h5("./data/0_alignment/dCas9_plus_NT_sgRNA/outs/filtered_peak_bc_matrix.h5")
+
+## Read meta data
+arc.meta <- read.csv("./data/0_alignment/dCas9_plus_Arc_sgRNA/outs/singlecell.csv")
+nt.meta <- read.csv("./data/0_alignment/dCas9_plus_NT_sgRNA/outs/singlecell.csv")
+
+## Define annotations
+anns <- rtracklayer::readGFF("./data/0_alignment/genes.gtf.gz")
+annotations <- anns |>
+    dplyr::filter(type %in% c("gene","exon", "UTR", "CDS")) |>
+    dplyr::select(c(seqid, start, end, strand,
+                    transcript_id, gene_name, gene_id,  gene_type, type )) |>
+    rename(gene_type = "gene_biotype",
+           transcript_id = "tx_id") |>
+    GRanges() |>
+    sort()
+
+################################################################################
+## Count EGFP and Cas9 reads for each cell in the subset bam files
+################################################################################
+## Read Bam files
+bam <- lapply(bam_fls, function(fl) {
+    ## Set parameters
+    which = ifelse(grepl("egfp",fl), "EGFP:1-100000","Cas9m4:1-100000")
+    param <- ScanBamParam(
+        flag = scanBamFlag(isProperPair = TRUE, isFirstMateRead = TRUE),
+        which = GRanges(c(which)),
+        what=c("rname", "strand", "pos", "qwidth", "seq","mapq"),
+        tag = "CB"
+    )
+    ## Load bam information
+    bam <- scanBam(fl, param = param)
+    ## Create df
+    bam_df <- data.frame(chr = bam[[1]]$rname,
+                         strand = bam[[1]]$strand,
+                         location = bam[[1]]$pos,
+                         width = bam[[1]]$qwidth,
+                         quality = bam[[1]]$mapq,
+                         sequence = bam[[1]]$seq,
+                         cell = bam[[1]]$tag$CB
+                         )
+    ## Add data for plotting
+    bam_df <- bam_df[bam_df$quality == 60,]
+})
+
+ec_mat <- lapply(bam, function(bam_df) {
+    ## Create matrix
+    cell_counts <- table(bam_df$cell)
+    cell_names <- names(table(bam_df$cell))
+    cell_mat <- t(Matrix::Matrix(table(bam_df$cell)))
+    colnames(cell_mat) <- cell_names
+    rownames(cell_mat) <- unique(head(bam_df$chr))
+    cell_mat
+})
+
+################################################################################
+## Add EGFP and Cas9 counts to counts matrices
+################################################################################
+## Add for arc - cas9
+arc_cas9m4 <- ec_mat$Arc_cas9m4[match(colnames(arc),colnames(ec_mat$Arc_cas9m4))]
+arc_cas9m4[is.na(arc_cas9m4)] <- 0
+arc_cas9m4 <- Matrix::Matrix(t(arc_cas9m4))
+rownames(arc_cas9m4) <- "Cas9m4:1-4105"
+
+## Add for arc - egfp
+arc_egfp <- ec_mat$Arc_egfp[match(colnames(arc),colnames(ec_mat$Arc_egfp))]
+arc_egfp[is.na(arc_egfp)] <- 0
+arc_egfp <- Matrix::Matrix(t(arc_egfp))
+rownames(arc_egfp) <- "EGFP:1-718"
+
+## Add to arc
+arc <- rbind(arc,arc_cas9m4)
+arc <- rbind(arc,arc_egfp)
+
+## Add for nt - cas9
+nt_cas9m4 <- ec_mat$NT_cas9m4[match(colnames(nt),colnames(ec_mat$NT_cas9m4))]
+nt_cas9m4[is.na(nt_cas9m4)] <- 0
+nt_cas9m4 <- Matrix::Matrix(t(nt_cas9m4))
+rownames(nt_cas9m4) <- "Cas9m4:1-4105"
+
+## Add for nt - egfp
+nt_egfp <- ec_mat$NT_egfp[match(colnames(nt),colnames(ec_mat$NT_egfp))]
+nt_egfp[is.na(nt_egfp)] <- 0
+nt_egfp <- Matrix::Matrix(t(nt_egfp))
+rownames(nt_egfp) <- "EGFP:1-718"
+
+## Add to nt
+nt <- rbind(nt,nt_cas9m4)
+nt <- rbind(nt,nt_egfp)
+
+################################################################################
+## Create common peak set
+################################################################################
+## Read in peak sets
+arc_peaks <- read.table("./data/0_alignment/dCas9_plus_Arc_sgRNA/outs/peaks.bed",
+                        col.names = c("chr","start","end"))
+nt_peaks <- read.table("./data/0_alignment/dCas9_plus_NT_sgRNA/outs/peaks.bed",
+                       col.names = c("chr","start","end"))
+
+## Convert to genomic ranges
+arc_peaks <- makeGRangesFromDataFrame(arc_peaks)
+nt_peaks <- makeGRangesFromDataFrame(nt_peaks)
+
+## Combine peaks
+peaks <- reduce(c(arc_peaks,nt_peaks))
+
+## Filter peaks based on length
+peakwidths <- width(peaks)
+peaks <- peaks[peakwidths  < 10000 & peakwidths > 20]
+
+## Add egfp and cas9
+peaks <- c(peaks,
+           GRanges(seqnames = c("Cas9m4","EGFP"),
+                   ranges = IRanges(start = c(1,1),end = c(4105,718))))
+
+################################################################################
+## Create fragment objects and quantify peaks
+################################################################################
+## Load fragments
+frags.arc <- CreateFragmentObject(
+    path = "./data/0_alignment/dCas9_plus_Arc_sgRNA/outs/fragments.tsv.gz",
+    cells = colnames(arc)
+)
+
+frags.nt <- CreateFragmentObject(
+    path = "./data/0_alignment/dCas9_plus_NT_sgRNA/outs/fragments.tsv.gz",
+    cells = colnames(nt)
+)
+
+## Quantify peaks in each dataset
+arc.counts <- FeatureMatrix(
+    fragments = frags.arc,
+    features = peaks,
+    cells = colnames(arc)
+)
+
+nt.counts <- FeatureMatrix(
+    fragments = frags.nt,
+    features = peaks,
+    cells = colnames(nt)
+)
+
+################################################################################
+## Pre-processing workflow and QC setup
+################################################################################
+## Create arc object
+arc.assay <- CreateChromatinAssay(arc.counts, genome = "mm10", fragments = frags.arc)
+arc.seu <- CreateSeuratObject(arc.assay, assay = "ATAC", project = "arc")
+## Manually add metadata
+arc.seu@meta.data <- cbind(arc.seu@meta.data,arc.meta[match(colnames(arc.seu), arc.meta$barcode),])
+## Add annotations
+Annotation(arc.seu) <- annotations[annotations$type == "gene"] # add the gene info to object
+## Add Nucleosome info - ATAC seq binding pattern periodicity
+arc.seu <- NucleosomeSignal(object = arc.seu)
+arc.seu$nucleosome_group <- ifelse(arc.seu$nucleosome_signal > 4, 'NS > 4', 'NS < FragmentHistogram')
+FragmentHistogram(object = arc.seu, group.by = 'nucleosome_group', region = 'chr1-1-10000000')
+## Add information about reads in peaks and at TSS locations
+arc.seu <- TSSEnrichment(arc.seu)
+arc.seu$pct_reads_in_peaks <- arc.seu$peak_region_fragments / arc.seu$passed_filters * 100
+
+## Create nt object
+nt.assay <- CreateChromatinAssay(nt.counts, genome = "mm10", fragments = frags.nt)
+nt.seu <- CreateSeuratObject(nt.assay, assay = "ATAC", project = "nt")
+## Manually add metadata
+nt.seu@meta.data <- cbind(nt.seu@meta.data,nt.meta[match(colnames(nt.seu), nt.meta$barcode),])
+## Add annotations
+Annotation(nt.seu) <- annotations[annotations$type == "gene"] # add the gene info to object
+## Add Nucleosome info - ATAC seq binding pattern periodicity
+nt.seu <- NucleosomeSignal(object = nt.seu)
+nt.seu$nucleosome_group <- ifelse(nt.seu$nucleosome_signal > 4, 'NS > 4', 'NS < FragmentHistogram')
+FragmentHistogram(object = nt.seu, group.by = 'nucleosome_group', region = 'chr1-1-10000000')
+## Add information about reads in peaks and at TSS locations
+nt.seu <- TSSEnrichment(nt.seu)
+nt.seu$pct_reads_in_peaks <- nt.seu$peak_region_fragments / nt.seu$passed_filters * 100
+
+## Clean up a bit
+rm(arc, arc_cas9m4, arc_egfp, arc_peaks, arc.counts, arc.meta, frags.arc,
+   nt, nt_cas9m4, nt_egfp, nt_peaks, nt.counts, nt.meta, frags.nt,
+   ec_mat, peaks, peakwidths)
+
+################################################################################
+## Merge seurat objects and filter
+################################################################################
+## Add info to identity dataset
+arc.seu$dataset <- 'arc'
+nt.seu$dataset <- 'nt'
+
+## Merge datasets
+combined <- merge(
+    x = arc.seu,
+    y = nt.seu,
+    add.cell.ids = c("arc", "nt")
+)
+
+## Check nucleosome patterns
+FragmentHistogram(object = combined,
+                  group.by = "dataset",
+                  region = 'chr1-1-10000000')
+
+## Check QC
+VlnPlot(
+    object = combined,
+    features = c('pct_reads_in_peaks','nCount_ATAC',"nFeature_ATAC",
+                 'TSS.enrichment', 'nucleosome_signal'),
+    pt.size = 0.1,
+    ncol = 5
+)
+
+## Define filters
+minCount <- 300
+maxCount <- 75000
+minTSSenrich <- 2
+minPreadsPeaks <- 30
+maxNucSignal <- 4
+
+seu <- subset(combined,
+              nCount_ATAC > minCount & nCount_ATAC < maxCount & 
+              TSS.enrichment > minTSSenrich &
+              pct_reads_in_peaks > minPreadsPeaks& 
+              nucleosome_signal < maxNucSignal 
+              )
+
+VlnPlot(seu,
+        features = c('pct_reads_in_peaks','nCount_ATAC',"nFeature_ATAC",
+                     'TSS.enrichment', 'nucleosome_signal'),
+        pt.size = 0.1,
+        ncol = 5
+        )
+
+################################################################################
+## Normalization and linear dimensional reduction
+################################################################################
+## Normalize (linear reduction) and find features
+seu <- RunTFIDF(seu)
+seu <- FindTopFeatures(seu, min.cutoff = 'q0')
+seu <- RunSVD(seu)
+DepthCor(seu)
+
+## Cluster cells
+seu <- RunUMAP(seu, dims = 2:30, reduction = 'lsi')
+seu <- FindNeighbors(seu, dims = 2:30, reduction = "lsi")
+seu <- FindClusters(seu, algorithm = 3, resolution = 0.1, verbose = FALSE)
+
+## Coverage at Arc location 
+Annotation(seu) <- annotations
+Annotation(seu) <- annotations[annotations$type == "gene"] # add the gene info to object
+
+################################################################################
+## Characterize Clusters
+################################################################################
+## Count cells in each cluster
+cellCount <- table(seu@meta.data$seurat_clusters, seu@meta.data$orig.ident)
+cellCount <- data.frame(cellCount)
+
+cellCount |>
+    spread(key = Var2, value = Freq) |>
+    mutate(total = arc + nt) |>
+    mutate(perc = paste(round(100*(total/sum(total)),1),"%",sep = ""))
+  
+## Compute gene activities
+gene.activities <- GeneActivity(seu)
+
+## add the gene activity matrix to the Seurat object as a new assay
+seu[['RNA']] <- CreateAssayObject(counts = gene.activities)
+DefaultAssay(seu) <- "RNA"
+
+## Data processing
+seu <- FindVariableFeatures(seu)
+seu <- NormalizeData(seu)
+seu <- ScaleData(seu)
+
+## Run MapMyCells to see potential cell types
+rnaCounts <- as.matrix(seu@assays$RNA@counts) ## Read count matrix (raw gene activities)
+obs = colnames(rnaCounts) # Store sample-based metadata in a dataframe called obs
+var2 = rownames(rnaCounts) # gene data - does this need to be entrez ids?
+obs <- data.frame(obs)
+rownames(obs) <- obs$obs
+var2 <- data.frame(var2)
+rownames(var2) <- var2$var2
+count_matrix <- t(rnaCounts) ## Transpose counts so samples are rows and genes are columns
+count_matrix <- as.sparse(count_matrix)
+ad <- AnnData(X = count_matrix, obs = obs, var = var2)
+output_path = "./data/1_SeuratObject/adata_for_MapMyCells.h5ad" # Write with compression
+write_h5ad(ad, output_path, compression='gzip')
+file_size_bytes = file.size(output_path) # Determine and print the file size
+print(paste("File size in bytes:", file_size_bytes))
+
+## From here, load file into mapmycells and continue analysis with output
+
+## Load MapMyCells Output
+mapmycells <- read.csv("./data/1_SeuratObject/adata_for_MapMyCells_10xWholeMouseBrain(CCN20230722)_HierarchicalMapping_UTC_1731425981380/adata_for_MapMyCells_10xWholeMouseBrain(CCN20230722)_HierarchicalMapping_UTC_1731425981380.csv", skip = 4)
+
+## Add mapmy cells to seurat object
+mmc <- select(mapmycells,
+              c("cell_id",
+                "class_name","class_bootstrapping_probability",
+                "subclass_name", "subclass_bootstrapping_probability",
+                "supertype_name","supertype_bootstrapping_probability",
+                "cluster_name","cluster_bootstrapping_probability"))
+seu@meta.data <- cbind(seu@meta.data,mmc[match(mmc$cell_id, Cells(seu)),])
+
+## Quality of assignments
+FeaturePlot(seu,
+            features = c("class_bootstrapping_probability",
+                         "subclass_bootstrapping_probability",
+                         "supertype_bootstrapping_probability",
+                         "cluster_bootstrapping_probability"),
+            order = FALSE)
+
+## Visualize Cell types
+DimPlot(seu, group.by = "class_name")
+DimPlot(seu, group.by = "class_name",label = TRUE)
+DimPlot(seu, group.by = "subclass_name")
+DimPlot(seu, group.by = "subclass_name",label = TRUE)
+DimPlot(seu, group.by = "supertype_name")
+DimPlot(seu, group.by = "supertype_name",label = TRUE)
+DimPlot(seu, group.by = "cluster_name")
+DimPlot(seu, group.by = "cluster_name",label = TRUE)
+
+## Filter cells that aren't well defined
+subclass.count <- data.frame(table(seu$subclass_name))
+seu.subclass <- subset(seu,
+                       subclass_bootstrapping_probability == 1 &
+                       subclass_name %in% subclass.count$Var1[subclass.count$Freq > 10])
+
+DimPlot(seu.subclass, group.by = "subclass_name")
+DimPlot(seu.subclass, group.by = "subclass_name",label = TRUE)
+
+seu.subclass@meta.data <- select(
+    seu.subclass@meta.data,
+    c("orig.ident", "barcode", "nCount_ATAC", "nFeature_ATAC",
+      "total","passed_filters","TSS_fragments","DNase_sensitive_region_fragments",
+      "on_target_fragments","peak_region_fragments","peak_region_cutsites",
+      "nucleosome_signal","nucleosome_percentile","TSS.enrichment","TSS.percentile",
+      "pct_reads_in_peaks", "seurat_clusters","nCount_RNA","nFeature_RNA",
+      "subclass_name","subclass_bootstrapping_probability"))
+
+################################################################################
+## DE analysis
+################################################################################
+## Seurat object
+seu <- seu.subclass
+DefaultAssay(seu) <-  "ATAC"
+
+## Define promoters from annotations
+gns <- annotations[annotations$type == "gene" | grepl("EGFP|Cas9",seqnames(annotations))]
+proms <- promoters(gns,upstream = 2000, downstream = 200)
+start(proms[grep("EGFP|Cas9", seqnames(proms))]) <- 1
+
+## Select DG cells
+seu.type <- SplitObject(seu, split.by = "subclass_name")
+seu.type <- seu.type$`037 DG Glut`
+
+## Select Double Positive cells
+counts <- seu.type@assays$ATAC@counts
+seu.type$cas9_pos <- counts[rownames(counts) == "Cas9m4-1-4105"] > 0
+seu.type$egfp_pos <- counts[rownames(counts) == "EGFP-1-718"] > 0
+seu.type$double_pos <- seu.type$cas9_pos & seu.type$egfp_pos
+
+## Compare orig.idents
+seu.pos <- subset(seu.type, cas9_pos == TRUE)
+
+## Run DE code for DG
+de.seu <- FindMarkers(
+    object = seu.pos,
+    group.by = "orig.ident",
+    ident.1 = "arc",
+    ident.2 = "nt",
+    min.pct = 0.1, 
+    logfc.threshold = 0.25,
+    min.cells.feature = 5,
+    min.cells.group = 5,
+    assay = "ATAC",
+    base = 2,
+    test.use = "LR",
+    latent.var = "nCount_ATAC" #https://github.com/stuart-lab/signac/issues/19
+)
+
+## Get peak regions of interest
+dg.glut_de <- de.seu
+dg.glut_de <- rownames_to_column(dg.glut_de, var = "peak") 
+dg.glut_de$peak <- factor(dg.glut_de$peak,
+                          levels = dg.glut_de$peak[order(dg.glut_de$avg_log2FC)])
+dg.glut_de$is.sig <- dg.glut_de$p_val_adj <= 0.05
+
+## Characterize peak location
+dg.glut_peaks <- dg.glut_de |>
+    separate(peak, into = c("chr","start","end"), sep = "-") |>
+    GRanges()
+
+## Find closest promoters
+promDist <- distanceToNearest(dg.glut_peaks,proms)
+dg.glut_peaks$closest_gene <- proms$gene_name[subjectHits(distanceToNearest(dg.glut_peaks,proms))]
+dg.glut_peaks$ensembl_id <- proms$gene_id[subjectHits(distanceToNearest(dg.glut_peaks,proms))]
+dg.glut_peaks$distance <- values(distanceToNearest(dg.glut_peaks,proms))$distance
+
+gn_desc <- gprofiler2::gconvert(dg.glut_peaks$ensembl_id, organism = "mmusculus")
+dg.glut_peaks$gnDescription <- gn_desc$description[match(dg.glut_peaks$ensembl_id, gn_desc$input)]
+
+################################################################################
+## Save data
+################################################################################
+writexl::write_xlsx(data.frame(dg.glut_peaks), "./data/1_SeuratObject/de_DGglut_Cas9pos_arcVnt.xlsx")
+
+saveRDS(seu, "./data/1_SeuratObject/seuObj_cellType_assignments.rds")
+
