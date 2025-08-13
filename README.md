@@ -1,5 +1,7 @@
 # 2025_Coda_NatureGenetics
 
+https://doi.org/10.5281/zenodo.16834060
+
 This is the code used to perform the analyses in the manuscript, "Cell-type and locus-specific epigenetic editing of memory expression" (Coda et al., 2025, Nature Genetics).
 
 
